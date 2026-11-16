@@ -11,42 +11,116 @@ on:
       variant:
         description: debug or release
         default: 'debug'
+      appname:
+        description: Name used in the APK file names
+        default: ''
+      zip_path:
+        description: Path of the source ZIP inside the repository (local ZIP mode)
+        default: ''
 permissions:
   contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      APPNAME: ${{ inputs.appname || github.event.repository.name }}
+      ZIP_PATH: ${{ inputs.zip_path }}
+      OUT: ${{ github.workspace }}/apkforge-out
     steps:
       - uses: actions/checkout@v4
+      - name: Locate project
+        run: |
+          D=.
+          if [ -n "$ZIP_PATH" ]; then
+            mkdir -p project
+            unzip -q "$ZIP_PATH" -d project
+            D=project
+            while [ "$(ls -A "$D" | wc -l)" = 1 ] && [ -d "$D/$(ls -A "$D")" ]; do D="$D/$(ls -A "$D")"; done
+          fi
+          pick() { awk '{print length, $0}' | sort -n | head -1 | cut -d' ' -f2-; }
+          MODE=""
+          SCRIPT=""
+          if ls "$D"/settings.gradle* "$D"/build.gradle* > /dev/null 2>&1; then
+            MODE=gradle
+          else
+            S=$(find "$D" -maxdepth 3 \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) | pick)
+            if [ -n "$S" ]; then D=$(dirname "$S"); MODE=gradle; fi
+          fi
+          if [ -z "$MODE" ]; then
+            S=$(find "$D" -maxdepth 2 -name build.sh | pick)
+            if [ -n "$S" ]; then MODE=script; SCRIPT="$S"; fi
+          fi
+          if [ -z "$MODE" ]; then
+            S=$(find "$D" -maxdepth 3 \( -name 'build.gradle' -o -name 'build.gradle.kts' \) | pick)
+            if [ -n "$S" ]; then D=$(dirname "$S"); MODE=gradle; fi
+          fi
+          if [ -z "$MODE" ]; then
+            echo "::error::Nessun progetto Gradle (build.gradle) e nessuno script build.sh trovato"
+            exit 1
+          fi
+          { echo "WORKDIR=$D"; echo "MODE=$MODE"; echo "SCRIPT=$SCRIPT"; } >> "$GITHUB_ENV"
+          echo "Mode: $MODE  Dir: $D  Script: $SCRIPT"
+          touch "$RUNNER_TEMP/marker"
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: ${{ inputs.java }}
-      - name: Accept SDK licenses
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+      - name: Prepare Android SDK
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          if [ "$MODE" = script ]; then
+            "$SDKM" "platforms;android-34" "platforms;android-36" "build-tools;34.0.0" "build-tools;36.0.0" > /dev/null || true
+          fi
       - uses: gradle/actions/setup-gradle@v4
-        if: ${{ hashFiles('gradlew') == '' }}
+        if: ${{ env.MODE == 'gradle' && hashFiles(format('{0}/gradlew', env.WORKDIR)) == '' }}
         with:
           gradle-version: '8.7'
-      - name: Build APK
+      - name: Build with Gradle
+        if: ${{ env.MODE == 'gradle' }}
+        working-directory: ${{ env.WORKDIR }}
         env:
           TASK: ${{ inputs.variant == 'release' && 'assembleRelease' || 'assembleDebug' }}
         run: |
           if [ -f ./gradlew ]; then chmod +x ./gradlew; ./gradlew "$TASK" --stacktrace; else gradle "$TASK" --stacktrace; fi
+      - name: Build with the project script
+        if: ${{ env.MODE == 'script' }}
+        run: |
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          AJ=$(ls "$ANDROID_HOME"/platforms/android-*/android.jar | sort -V | tail -1)
+          export ANDROID_JAR="$AJ" ANDROID_SDK_ROOT="$ANDROID_HOME" PATH="$BT:$PATH"
+          cd "$(dirname "$SCRIPT")"
+          bash "./$(basename "$SCRIPT")"
+      - name: Collect APKs
+        run: |
+          mkdir -p "$OUT"
+          if [ "$MODE" = gradle ]; then
+            find "$WORKDIR" -path '*/build/outputs/apk/*' -name '*.apk' > "$RUNNER_TEMP/apks.txt"
+            echo "LABEL=${{ inputs.variant }}" >> "$GITHUB_ENV"
+          else
+            find "$WORKDIR" -name '*.apk' -newer "$RUNNER_TEMP/marker" -not -path '*/apkforge-out/*' > "$RUNNER_TEMP/apks.txt"
+            echo "LABEL=build" >> "$GITHUB_ENV"
+          fi
+          while read -r f; do cp "$f" "$OUT/"; done < "$RUNNER_TEMP/apks.txt"
+          if ! ls "$OUT"/*.apk > /dev/null 2>&1; then
+            echo "::error::Nessun APK prodotto dalla build"
+            exit 1
+          fi
+          ls -l "$OUT"
       - name: Restore signing key
-        if: ${{ inputs.variant == 'release' }}
+        if: ${{ inputs.variant == 'release' && env.MODE == 'gradle' }}
         uses: actions/cache@v4
         with:
           path: ~/apkforge.jks
           key: apkforge-keystore-v1
       - name: Sign release APKs
-        if: ${{ inputs.variant == 'release' }}
+        if: ${{ inputs.variant == 'release' && env.MODE == 'gradle' }}
         run: |
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           [ -f ~/apkforge.jks ] || keytool -genkeypair -keystore ~/apkforge.jks \
             -storepass apkforge -keypass apkforge -alias apkforge \
             -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=APKForge"
-          find . -path '*/build/outputs/apk/*' -name '*.apk' | while read -r f; do
+          find "$OUT" -name '*.apk' | while read -r f; do
             out="${f/-unsigned.apk/.apk}"
             "$BT/zipalign" -f -p 4 "$f" "$f.aligned"
             "$BT/apksigner" sign --ks ~/apkforge.jks --ks-pass pass:apkforge --key-pass pass:apkforge \
@@ -54,10 +128,22 @@ jobs:
             rm -f "$f" "$f.aligned"
             mv "$out.signed" "$out"
           done
+      - name: Name APKs with project and version
+        run: |
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          NAME=$(printf '%s' "$APPNAME" | tr -c 'A-Za-z0-9._-' '-')
+          find "$OUT" -name '*.apk' | while read -r f; do
+            v=$("$BT/aapt2" dump badging "$f" 2>/dev/null | sed -n "s/.*versionName='\([^']*\)'.*/\1/p" | head -1 || true)
+            v=$(printf '%s' "${v:-0}" | tr -c 'A-Za-z0-9._-' '-')
+            b=$(basename "$f")
+            case "$b" in "$NAME-$v-"*) continue ;; esac
+            mv "$f" "$(dirname "$f")/$NAME-$v-$b"
+          done
+          ls -l "$OUT"
       - uses: actions/upload-artifact@v4
         with:
           name: apk
-          path: '**/build/outputs/apk/**/*.apk'
+          path: apkforge-out/*.apk
           if-no-files-found: error
       - name: Publish GitHub Release
         if: ${{ inputs.release == 'true' }}
@@ -65,8 +151,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          mapfile -t FILES < <(find . -path '*/build/outputs/apk/*' -name '*.apk')
+          mapfile -t FILES < <(find "$OUT" -name '*.apk')
           gh release create "apkforge-${{ github.run_number }}" "${FILES[@]}" \
-            --title "APK ${{ inputs.variant }} (build #${{ github.run_number }})" \
+            --title "$APPNAME $LABEL (build #${{ github.run_number }})" \
             --notes "Compilato con APKForge" \
             --target "${{ github.sha }}"
+      - name: Remove source ZIP from the repository
+        if: ${{ always() && inputs.zip_path != '' }}
+        run: |
+          git config user.name "APKForge"
+          git config user.email "apkforge@users.noreply.github.com"
+          git rm -q --ignore-unmatch "$ZIP_PATH"
+          git commit -qm "Remove source ZIP" || exit 0
+          git push || true

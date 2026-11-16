@@ -871,8 +871,14 @@ function size() {
   if (w === W && h === H && dpr === DPR
       && (released ? !cv.width : cv.width === bw && cv.height === bh)) return;
   DPR = dpr; W = w; H = h;
-  /* A released canvas is left released: there is nothing to size it for. */
-  if (P.length && !still) fitCanvas(); else releaseCanvas();
+  /* A released canvas is left released: there is nothing to size it for, and
+     neither is one on a page nobody is looking at (see `releaseCanvas`): a
+     resize that arrives while the app is in the background — a rotation, a
+     keyboard, another app taking the screen — would otherwise take the whole
+     backing store back for a picture that cannot be drawn until the reader
+     returns. The measurement above is still recorded, so startFx() sizes the
+     store from the new W/H/DPR the moment the page is visible again. */
+  if (P.length && !still && !pageHidden()) fitCanvas(); else releaseCanvas();
   seed();
 }
 /* `size()` is only ever run from a resize or a rotation, and a device pixel
@@ -1050,6 +1056,18 @@ document.addEventListener('visibilitychange', () => {
   if (pageHidden()) {
     if (fxRaf) { cancelAnimationFrame(fxRaf); fxRaf = 0; }
     clearTimeout(lt);
+    /* The frames stop here, but the pixels they were drawn into stayed: a rain
+       or snow scene kept its whole backing store for as long as the app was
+       away — 860×1800 at DPR 2 is 6 192 000 bytes of WebView memory, plus the
+       compositor texture for a layer that carries `will-change: transform` —
+       and a weather app spends most of its life in the background. The store
+       is already handed back whenever there is nothing to draw (a clear sky,
+       Reduce motion); a page nobody is looking at is the same case, and the
+       largest one. startFx() takes it again on return, from the same W/H/DPR
+       and the same particle positions, so the field is the one the reader
+       left — nothing on screen changes, and the first frame after the return
+       draws the same drops in the same places. */
+    releaseCanvas();
   } else {
     startFx();
     lightning();
@@ -2418,9 +2436,30 @@ const fold = s => {
   return v.normalize ? v.normalize('NFD').replace(/[\u0300-\u036f]/g, '') : v;
 };
 const pickPopular = list => list.slice(0, 8).map(c => ({ name: c[0], sub: c[1], lat: c[2], lon: c[3] }));
+/* The short forms a reader types for a country this list carries under its full
+   name, and that no rule below can reach. "uae" is not here — the country is
+   filed under that spelling already, so the prefix rule answers it. */
+const COUNTRY_ALIAS = { uk: 'United Kingdom', gb: 'United Kingdom', usa: 'United States', us: 'United States' };
 function localMatches(q) {
   const s = fold(q.trim());
   if (!s) return [];
+  /* A country's short form is answered by the country it names, before any
+     prefix rule runs. The rule below reads a query as the start of one name or
+     one country, and "uk" is the start of "Ukraine": the only answer the sheet
+     could give for the United Kingdom was Kyiv — Ukraine's capital, under a
+     query that names a country whose three cities sit in this list — and
+     countryMatches() put that same row at the top of the geocoder's answer when
+     there was a connection, so the wrong city came first online too. "usa" and
+     "us" were the other half of the same gap: nothing in the list starts with
+     either, so the United States' twelve cities were unreachable offline. Only
+     forms the list cannot already resolve are in the table, and they are looked
+     up on the whole query, so every other query — "united", "uae", "ukr" — is
+     matched exactly as before. */
+  const alias = COUNTRY_ALIAS[s];
+  if (alias) {
+    const byCountry = pickPopular(POPULAR.filter(c => fold(c[1]) === fold(alias)));
+    if (byCountry.length) return byCountry;
+  }
   const hits = POPULAR.filter(c => {
     const name = fold(c[0]), country = fold(c[1]);
     return name.startsWith(s) || country.startsWith(s) ||
@@ -2534,7 +2573,7 @@ function row(o) {
   return `<div class="sh-i" data-lat="${o.lat}" data-lon="${o.lon}" data-name="${esc(o.name)}" data-sub="${esc(o.sub || '')}">
     <button class="tap" aria-label="${esc(name)}">
     <span class="ic" aria-hidden="true">${isSaved ? '📍' : '🔎'}</span>
-    <span style="min-width:0"><b>${esc(o.name)}</b><small>${esc(o.sub || '')}</small></span></button>${right}</div>`;
+    <span style="min-width:0"><b>${esc(o.name)}</b> <small>${esc(o.sub || '')}</small></span></button>${right}</div>`;
 }
 
 let lastResults = [];      // last painted results, reused when the sheet is repainted (after a removal)
@@ -2586,7 +2625,7 @@ function paintSheet(q, results) {
       `<div class="sh-i">
         <button class="tap" aria-label="${esc(p.name + (p.sub ? ', ' + p.sub : ''))}" data-go="${places.indexOf(p)}">
         <span class="ic" aria-hidden="true">🏙️</span>
-        <span style="min-width:0"><b>${esc(p.name)}</b><small>${esc(p.sub || '')}</small></span></button>
+        <span style="min-width:0"><b>${esc(p.name)}</b> <small>${esc(p.sub || '')}</small></span></button>
         <button class="rm" data-rm2="${places.indexOf(p)}" aria-label="Remove ${esc(p.name)}">✕</button></div>`).join('');
   }
   if (q.trim()) {
@@ -2704,8 +2743,11 @@ function dedupe(list) {
 }
 
 function countryMatches(term) {
-  const t = fold(term);
-  return POPULAR.filter(c => fold(c[1]).startsWith(t) && fold(c[0]) !== t)
+  const t = fold(term.trim());
+  /* the short form first, or "uk" answers Ukraine (see COUNTRY_ALIAS) */
+  const alias = COUNTRY_ALIAS[t];
+  return POPULAR.filter(c => alias ? fold(c[1]) === fold(alias)
+      : fold(c[1]).startsWith(t) && fold(c[0]) !== t)
     .slice(0, 6).map(c => ({ name: c[0], sub: c[1], lat: c[2], lon: c[3] }));
 }
 

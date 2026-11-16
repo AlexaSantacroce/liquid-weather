@@ -2620,6 +2620,261 @@ one more, found on the day's last pass.
 
 ## [Unreleased]
 
+### Fixed — accessibility & semantics (2026-11-17, 02:00 IST pass)
+- **Every row of the city list failed WCAG 2.5.3 (Label in Name).** A row's
+  spoken name is stated on the button — `aria-label="Mumbai, India"` — while the
+  two pieces of text the row paints, `<b>Mumbai</b>` and `<small>India</small>`,
+  sat in the markup with nothing between them. Both are `display:block`, so the
+  browser drew them on separate lines and a reader saw "Mumbai / India"; text
+  extraction, however, concatenated the two adjacent text nodes into one word,
+  **"MumbaiIndia"**, and an accessible name of "Mumbai, India" does not contain
+  that word. Axe reports it as `label-content-name-mismatch` (serious) on
+  **nine rows at once** — the eight *Popular* rows plus the pinned saved row —
+  in the sheet's default state, on the two rows of a live result, and on every
+  saved row of the *Saved places* group; it was the only violation axe found on
+  the page in any state (the forecast screen, the settings panel and the offline
+  screen are clean).
+- The defect is the missing separator, so the separator is the fix: a single
+  space between `</b>` and `<small>` in the two templates that paint a row
+  (`row()`, used for *Popular* and for results, and the *Saved places* group in
+  `paintSheet()`). The visible text is now "Mumbai India", the spoken name
+  "Mumbai, India" contains it, and the rule passes on all four row states —
+  popular list, live results, saved places, and the repaint after a removal.
+- Nothing moves: `b` and `small` are both `display:block`, so the whitespace
+  between them collapses into the anonymous block that sits between two block
+  boxes and paints nothing. Measured on both builds with the sheet open and a
+  saved city present: the position, size, font size and display of all **61**
+  elements of `#shList` are identical, and a screenshot of `#sheet` (with the
+  randomly-seeded `#fx`, `#clouds`, `#photo` and `#orbLayer` layers hidden) is
+  byte-identical between the two files.
+- Version bumped to 1.14.1 (`versionCode 84`), same signing key, so it installs
+  over 1.14; `android/assets/index.html` is byte-identical to `web/index.html`
+  (SHA-256 `57fddac0…`), the APK was rebuilt from this tree with
+  `android/build.sh` (JDK 17, build-tools 34.0.0, platform 34), bundles that
+  same page, carries `versionCode 84` / `versionName 1.14.1`
+  (`.github/scripts/verify_apk.py` agrees on all three), and `CHECKSUMS.txt`
+  carries the new digest (`46bd46fd…`), as does the `sha256sum` block in
+  `README.md` (`verify_docs.py` agrees). The build is still 111 464 bytes
+  (109 KB), so no size figure in the README or the store listing moved.
+  `apksigner verify --print-certs` still reports the project key (`2035d69f…`,
+  `CN=Liquid Weather`).
+
+### Notes
+- No visual change: the edit is two spaces in two template literals; no markup
+  element, class, CSS rule, colour, spacing, gradient, glass value, wording or
+  animation timing was touched, and the two measurements above (61 identical
+  boxes, byte-identical sheet screenshot) say so rather than the diff alone.
+- Verified: `node --check` on the page's extracted script (174 913 bytes); a
+  headless Chromium load of `web/index.html` with the forecast, geocoder,
+  Nominatim, BigDataCloud, Commons and image responses mocked reports **zero
+  console errors and zero page errors**, and axe-core run over the whole page in
+  the forecast state and with the sheet open reports **zero violations**; and
+  the fix proved old-against-new in the same harness, where the nine-row
+  `label-content-name-mismatch` violation on 1.14 disappears on this build while
+  the boxes and the pixels do not move.
+- Left alone deliberately: (1) **the `✕`, `↻` and pin-only controls still carry
+  symbol-only visible text** — `aria-label="Close search"` over "✕",
+  `"Refresh forecast"` over "↻" — which axe reports as *incomplete* rather than
+  a violation because a symbol yields no words to compare; giving them a spoken
+  name that contains the glyph would make the app read out a symbol for no gain
+  to a voice user, and the names they have are the ones a person says; (2) **the
+  7-day rows still announce "Today 21° 31°"** with no low/high words and the
+  range bar still carries no accessible value (unchanged from the 11 November
+  passes: both need a clipped-out text node per cell, a DOM change nobody has
+  proved paint-free); (3) **text contrast over the scenes** is unchanged — the
+  top bar's city name still falls to 2.97:1 on the fog scene, and every route to
+  raising it (a text shadow, a darker glass under the bar) is a visible change;
+  (4) **the `:focus-visible` ring is `#fff` with no dark edge**, so on the
+  brightest part of a clear-sky scene the ring itself is low-contrast — a ring
+  colour is a visible change, so it is written down, not shipped; (5) **the
+  cards' `.lbl` labels are not headings**, so a screen reader cannot jump
+  between *Hourly forecast*, *7-day forecast* and the metric cards — that is a
+  navigation improvement rather than a defect, and this pass ships fixes only.
+
+### Clean — storage robustness (2026-11-17, 00:00 IST pass)
+- **Nothing shippable found in the area; the page is unchanged, no version was
+  bumped and the published APK is untouched.** This is the rotation's second
+  visit to storage (the first was the 15 November 12:00 and 22:00 passes), and
+  what those passes left behind was re-read and then re-exercised rather than
+  taken on trust: `LS`, all five keys (`lw_places`, `lw_cur`, `lw_photos`,
+  `lw_set`, `lw_unit`), `cleanPlace`/`loadPlaces`/`hasFix`/`samePlace`/
+  `repairSaved`, `cleanSet`, `readPhotoStore`/`cleanPhoto`/`savePhotos`/
+  `prunePhotos`, `pruneCache`, `dropTwin`, `locate`, `fallbackPlace`,
+  `addPlace`, `removeSaved`, the three branches of the `storage` handler, and
+  the shell's side of it (`MainActivity` serves the page from an `https` origin
+  through `loadDataWithBaseURL`, which is what makes `localStorage` persist at
+  all — it is not `file:` or `data:`).
+- Eleven stored states were booted one at a time in headless Chromium against a
+  mocked forecast, geocoder and Commons: `lw_unit` holding an object; `lw_cur`
+  as a string, as a fraction and as an object; two rows carrying the reserved id
+  `loc`; `lw_photos` as an array; a photo record dated 9e15; a row whose `name`
+  is an object; `lw_set` as an array; every key `null`; and unparseable JSON in
+  every key. **All eleven boot with zero console errors and zero page errors**,
+  each paints its page and each lands on a row that exists.
+- The two failure modes the area exists for were simulated at their worst rather
+  than assumed: with `Storage.prototype.setItem` throwing `QuotaExceededError` on
+  *every* write — harsher than filling the origin, which the 15 November pass
+  measured at 4.75 MB — the app still boots, adds a city, selects it and toggles
+  the unit with no errors and a valid `cur`; and with `window.localStorage`
+  itself throwing `SecurityError` on access (storage disabled) the page boots,
+  renders and falls back to the default city with no errors.
+- Two documents on one origin were driven through 40 random actions — unit
+  toggle, slider write, *Reset to default*, select, add, remove, `locate`,
+  refresh, open/close the sheet and the panel, `pruneCache` — with random
+  garbage written into a random key between steps. At every checkpoint both
+  documents held at most six rows, `cur` pointed at a real row, and neither
+  memory nor disk held a photo record for a key no row owns. The one divergence
+  seen was the last-write-wins race recorded below, reproduced only by adding a
+  city in both documents inside the same JavaScript task, which no reader can do.
+- `node --check` is clean on the extracted script (174,911 bytes), a headless
+  load of the page with default storage and with a saved city in °F plus
+  non-default glass reports **zero console errors and zero page errors** and
+  seven day rows, and `android/assets/index.html` is still byte-identical to
+  `web/index.html`, so the APK already published is the page this pass audited.
+- Left alone deliberately, unchanged from 15 November and re-confirmed here:
+  (1) `LS.set()` still swallows a quota error, which stays unreachable and cannot
+  be reported without wording the freeze forbids; (2) a row dropped at boot
+  keeps its `lw_photos` record until the next photo write — residue, never able
+  to evict a live city's record from the twelve slots; (3) `savePhotos()`'s
+  union prefers this document's copy of a key, which can only disagree with a
+  newer stored copy inside the milliseconds before that document's `storage`
+  event is delivered; (4) a stale document can still write its list over a newer
+  one — closing that needs a version and merge rule, a behaviour change; (5)
+  `lw_unit` and `lw_cur` are still not adopted from another document (adopting
+  the unit would repaint the other tab); (6) a stored list longer than six rows
+  is still capped in memory without being written back. Two further stored
+  shapes are accepted as they are because no path in the app can produce them
+  and the cost of "fixing" them is a behaviour change: a row that carries the
+  reserved id `loc` alongside real coordinates is merged away by
+  `repairSaved()` like any other duplicate key, and two rows that share an id
+  are one place by the app's own rule.
+
+### Fixed — search & geocoding (2026-11-16, 22:00 IST pass)
+- **The query "uk" answered Kyiv — Ukraine's capital — although the United
+  Kingdom's three cities are in the bundled list.** `localMatches()` and
+  `countryMatches()` both read a query as the *start* of a country's name, and
+  "uk" is the start of "Ukraine". Offline, where the bundled list is the only
+  answer a reader can get, that made Kyiv the single result for a query that
+  names a country the list carries: the sheet read `1 result for “uk”` over
+  "Kyiv, Ukraine", and tapping it saved Kyiv and showed its weather. With a
+  connection the same rule put that row at the *top* of the geocoder's answer,
+  so the wrong city came first online as well. "usa" and "us" were the other
+  half of the same gap: nothing in the list starts with either, so the United
+  States' twelve cities were unreachable by the abbreviation everyone types —
+  `No place called “usa”. Try a nearby city, or the country name.`
+- Both matchers now resolve a country's short form before any prefix rule runs,
+  from one small table (`COUNTRY_ALIAS`: `uk`/`gb` → United Kingdom,
+  `usa`/`us` → United States). "uae" is deliberately not in it — the country is
+  filed under that spelling, so the prefix rule already answers it. The lookup
+  is on the whole query, so nothing else moves: "united", "ukr", "uae",
+  "india", "korea", "japan", "mumbai india", "bogota", "turkiye" and every
+  other query return exactly the rows and status line they did before — checked
+  old-against-new on 38 queries, 34 identical and the four aliases fixed.
+- Version bumped to 1.13.6 (`versionCode 82`), same signing key, so it installs
+  over 1.13.5; `android/assets/index.html` is byte-identical to `web/index.html`
+  (SHA-256 `c79dc92c…`), the APK was rebuilt from this tree with
+  `android/build.sh` (JDK 17, build-tools 34.0.0, platform 34), bundles that
+  same page, carries `versionCode 82` / `versionName 1.13.6`
+  (`.github/scripts/verify_apk.py` agrees on all three), and `CHECKSUMS.txt`
+  carries the new digest (`69523434…`), as does the `sha256sum` block in
+  `README.md` (`verify_docs.py` agrees). The build is still 111 464 bytes
+  (109 KB), so no size figure in the README or the store listing moved.
+  `apksigner verify --print-certs` still reports the project key (`2035d69f…`,
+  `CN=Liquid Weather`).
+
+### Notes
+- No visual change: no markup, CSS, wording, colour, spacing, gradient, glass
+  value or animation timing was touched. The edit adds one lookup table, five
+  lines in `localMatches()` and three in `countryMatches()`; the rows a reader
+  sees for "uk", "gb", "usa" and "us" are now the right country's, and every
+  other query paints exactly what it painted before.
+- Verified: `node --check` on the page's extracted script; headless Chromium
+  loads of `web/index.html` with the forecast, geocoder, Nominatim, BigDataCloud,
+  Commons and image responses mocked reporting **zero console errors and zero
+  page errors**; and the fix proved old-against-new in the same harness — with
+  both geocoders answering 503, "uk" went from `1 result for “uk”`
+  (Kyiv/Ukraine) to London, Manchester and Edinburgh, "gb" from `No place
+  found` to the same three, "usa" and "us" from `No place found` to New York,
+  Los Angeles, Chicago, San Francisco, Seattle and Miami; online the same four
+  queries changed the same way, and the other 34 queries compared (including
+  "united", "uae", "ukr", "india", "korea", "japan", "mumbai india",
+  "İstanbul", "%%", "in", "ab") are identical in rows and status line.
+- Left alone deliberately: (1) **city aliases** — "bangalore", "bombay", "new
+  delhi" and "munchen" still find nothing offline although Bengaluru, Mumbai,
+  Delhi and Munich are in the list; that is a missing answer rather than a
+  wrong one, it needs a city-alias table the bundled list has never had, and the
+  02:00 pass already recorded it as a behaviour decision; (2) **the country
+  prefix rule itself** — "in" still returns Indian cities and "ch" Chinese
+  ones, which is the type-ahead the sheet is meant to do, and narrowing it would
+  change what a half-typed query returns; (3) **a query that names a country
+  alongside a city** ("japan tokyo") is still sent to both geocoders before the
+  bundled list answers, which costs a request but gives the right answer.
+
+### Fixed — memory & lifecycle (2026-11-16, 20:00 IST pass)
+- **A rain, snow or thunder scene held its whole canvas backing store for as
+  long as the app was in the background.** The particle canvas is 860×1800
+  pixels at DPR 2 — 6 192 000 bytes of WebView memory, plus the compositor
+  texture for a layer that carries `will-change: transform` — and the store is
+  deliberately handed back whenever there is nothing to draw: a clear or cloudy
+  scene seeds no particles, and Reduce motion paints nothing at all. A page
+  nobody is looking at is the same case, and the largest one: the
+  `visibilitychange` handler stopped the frame loop and the lightning chain but
+  left the pixels where they were, so a phone that spent the day on its last
+  rainy city kept 6.2 MB of them for the whole time the app was away — which,
+  for a weather app, is most of its life. The handler now releases the store
+  with the frames, and `size()` no longer takes it back on a resize that arrives
+  while the app is in the background (a rotation, the keyboard, another app
+  taking the screen used to reallocate the whole store for a picture that could
+  not be drawn). `startFx()` already takes the store again on return, from the
+  same W/H/DPR and the same particle positions, so the field the reader comes
+  back to is the field they left — measured in headless Chromium, the store goes
+  from 860×1800 (6 192 000 bytes) to 0×0 while hidden, a resize during that time
+  leaves it released at the new measurement (800×1760 on return, 5 632 000
+  bytes), and the drops are painted again in the first frame after the return.
+- Version bumped to 1.13.5 (`versionCode 81`), same signing key, so it installs
+  over 1.13.4; `android/assets/index.html` is byte-identical to `web/index.html`
+  (SHA-256 `1960e32d…`), the APK was rebuilt from it with `android/build.sh`
+  (JDK 17 + build-tools 34.0.0 + platform 34), bundles that same page, carries
+  `versionCode 81` / `versionName 1.13.5` (`.github/scripts/verify_apk.py`
+  agrees on all three), and `CHECKSUMS.txt` carries the new digest
+  (`28c3df13…`), as does the `sha256sum` block in `README.md`
+  (`verify_docs.py` agrees). The build is still 111 464 bytes (109 KB), so no
+  size figure in the README or the store listing moved.
+  `apksigner verify --print-certs` still reports the project key (`2035d69f…`,
+  `CN=Liquid Weather`).
+
+### Notes
+- No visual change: two statements were added — one call inside the existing
+  `visibilitychange` handler, one condition inside `size()` — and the rest of
+  each hunk is the comment explaining them. No markup, CSS, wording, colours,
+  spacing, gradients, glass values, animation timings or particle counts were
+  touched, and nothing on screen differs while the page is visible.
+- Verified: `node --check` on the page's script; a headless Chromium load of
+  `web/index.html` with the forecast, geocoder, BigDataCloud, Nominatim, Commons
+  and image responses mocked reporting **zero console errors and zero page
+  errors**; and the fix proved against the same page with the lifecycle
+  exercised — the canvas attribute is `0×0` after the document is marked hidden
+  (it was `860×1800`, 6 192 000 bytes, before), no animation frame runs while it
+  is hidden, a viewport resize during that time leaves it released and records
+  the new measurement, and on return it is `800×1760` with the loop running
+  again and the drops repainted (2 531 → 2 796 non-transparent pixels in the
+  sampled band). A second hide/show cycle repeats the same numbers.
+- Left alone deliberately: (1) **the 60-second `autoRefresh` interval keeps
+  ticking while the page is hidden** — it returns immediately on
+  `visibilityState !== 'visible'`, so the cost is one timer wake a minute, and
+  clearing it would mean re-arming it on return for no measurable gain. (2) **The
+  nine cloud layers and the sun keep their compositor animations while the app
+  is away**, because that is what `WebView.onPause()` is for and the shell
+  already calls it — pausing them from the page as well would duplicate a
+  platform signal and change the scene's animation state on return. (3) **A
+  lookup whose city was deleted still finishes its download** — the Commons
+  image request is an `Image`, which cannot be aborted, and the record is
+  discarded on arrival by the `photoSeq`/`photoKey` guards; cancelling it would
+  need a different transport for no visible gain. (4) **`preFail` keeps one
+  entry per city the device has been located in for the session** — a handful of
+  small objects, bounded by the six rows the app allows, and pruning it on every
+  write costs more than it frees.
+
 ### Fixed — geolocation edge cases (2026-11-16, 16:00 IST pass)
 - **A located row on the equator was read as "no location yet" and silently
   replaced by the next city the reader picked.** `addPlace()` decides whether
@@ -4359,6 +4614,75 @@ one more, found on the day's last pass.
 Ideas that would be welcome: a language switch, sleet/haze scenes,
 a home-screen widget, and a "feels like" curve on the hourly strip.
 
+## [1.14] — 2026-11-16
+
+The day's release, cut from the 22:00 IST pass. It publishes everything the
+programme fixed on 16 November — the 00:00, 02:00, 10:00, 14:00, 16:00, 20:00
+and 22:00 passes — as one version, and rebuilds the APK so the published app is
+the app in the repository.
+
+### Fixed (carried in this release)
+- **The query "uk" answered Kyiv — Ukraine's capital — although the United
+  Kingdom's three cities are in the bundled list** (22:00 pass, search &
+  geocoding): both matchers read a query as the start of a country's name, and
+  "uk" is the start of "Ukraine", so the sheet's only answer offline was Kyiv
+  and its first row online was Kyiv too; "usa" and "us" answered nothing at
+  all. A country's short form is now resolved before any prefix rule runs. See
+  the "search & geocoding" entry above.
+- **A rain, snow or thunder scene held its whole canvas backing store while the
+  app was in the background** (20:00 pass, memory & lifecycle): 6.2 MB of
+  WebView memory plus its compositor texture, for a page nobody was looking at.
+  The `visibilitychange` handler now releases the store with the frames, and a
+  resize that arrives while hidden no longer reallocates it.
+- **A located row on the equator was read as "no location yet" and silently
+  replaced by the next city the reader picked** (16:00 pass, geolocation edge
+  cases): `addPlace()` decided with `!places[0].lat`, and latitude 0 is a real
+  coordinate but a falsy number, so the pinned row and its `myLoc` flag were
+  overwritten and the app never asked for a position again. `hasFix()` decides
+  it now.
+- **The store listing still quoted the APK as 105 KB after the build grew to
+  109 KB, and nothing read any of the five hand-written size figures** (14:00
+  pass, build & release hygiene): every `N KB` figure in `README.md` and
+  `STORE.md` is now compared with the committed APK by `verify_docs.py`.
+- **The ten-minute auto refresh only counted its own downloads, so a refresh the
+  reader had just made was followed by a second, identical one** (10:00 pass,
+  memory & lifecycle): every forecast actually downloaded now moves the mark.
+- **Re-opening the search sheet did not stop the search already under way**
+  (02:00 pass, search & geocoding): the sheet came back showing results for a
+  query no longer in its box, and the request ran on to both geocoders' 9 s
+  deadlines. `openSheet()` now clears the debounce and aborts the request, as
+  `closeSheet()` always has.
+- **A device pixel ratio that changed while the canvas box did not left the
+  particle field drawing at the wrong scale** (00:00 pass, memory & lifecycle):
+  `size()` runs only on `resize`/`orientationchange`, so a display-scale change
+  kept the store at the ratio it was built with. A `(resolution: <dpr>dppx)`
+  watcher re-runs `size()` when the ratio moves.
+
+### Notes
+- `versionCode 83` / `versionName 1.14` in `android/AndroidManifest.xml` (up
+  from 82 / 1.13.6), same signing key, so it installs over every 1.13 build.
+- `web/index.html` is the page this day's fixes produced and is byte-identical
+  to `android/assets/index.html` (SHA-256 `c79dc92c…`); the 22:00 pass is the
+  only one after 1.13.6, and its change is in it.
+- The APK was rebuilt from this tree with `android/build.sh` (JDK 17,
+  build-tools 34.0.0, platform 34). It bundles `assets/index.html`
+  byte-identical to `web/index.html`, carries `versionCode 83` /
+  `versionName 1.14`, and `.github/scripts/verify_apk.py` agrees on all three.
+  `CHECKSUMS.txt` carries the new digest,
+  `d73eacdf8235f5e943f93a4988d9b8c6081d6e8cc5630b73d3e4775222942c43`, and so
+  does the `sha256sum` block in `README.md` (checked by `verify_docs.py`), which
+  now also names v1.14, as does `STORE.md`; `apksigner verify --print-certs`
+  reports the project key (`2035d69f…`, `CN=Liquid Weather`).
+- The APK is still 111 464 bytes (109 KB), so no size figure in `README.md` or
+  `STORE.md` moved.
+- Verified: `node --check` on the page's script; headless Chromium loads of
+  `web/index.html` with mocked forecast, geocoder, Nominatim, BigDataCloud,
+  Commons and image responses reporting **zero console errors and zero page
+  errors**; the per-pass checks recorded in each entry above; `python3
+  .github/scripts/verify_apk.py .`, `python3 .github/scripts/verify_docs.py .`
+  and `sha256sum -c` on the committed APK, all green; `apksigner
+  verify --print-certs` on the committed APK.
+
 ## [1.9.1] — 2026-11-12
 
 ### Fixed
@@ -4879,7 +5203,8 @@ First public release.
 - APK is self-signed; Android shows the "unknown developer" prompt on install.
 - Verified signature schemes: v1, v2 and v3. `minSdk 23`, `targetSdk 34`.
 
-[Unreleased]: https://github.com/technicalnihilist-lgtm/liquid-weather/compare/v1.13...HEAD
+[Unreleased]: https://github.com/technicalnihilist-lgtm/liquid-weather/compare/v1.14...HEAD
+[1.14]: https://github.com/technicalnihilist-lgtm/liquid-weather/releases/tag/v1.14
 [1.13]: https://github.com/technicalnihilist-lgtm/liquid-weather/releases/tag/v1.13
 [1.12]: https://github.com/technicalnihilist-lgtm/liquid-weather/releases/tag/v1.12
 [1.11.2]: https://github.com/technicalnihilist-lgtm/liquid-weather/releases/tag/v1.11.2
